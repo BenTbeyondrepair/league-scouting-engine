@@ -36,11 +36,11 @@ def calculate_sls(kp, vspm, deaths):
     return numerator / denominator
 
 # ==========================================
-# 4. START THE TRACKING LOOP
+# 4. START THE ROLE-FILTERED TRACKING LOOP
 # ==========================================
 leaderboard = []
 
-print("🚀 Starting SLS Analysis Engine for Last 50 Solo Queue Games...\n")
+print("🚀 Starting Role-Filtered SLS Engine (Targeting last 50 ON-ROLE Solo Q games)...\n")
 
 for player in support_players:
     game_name = player["name"]
@@ -48,26 +48,29 @@ for player in support_players:
     print(f"Retrieving profile for {game_name}#{tag_line}...")
     
     try:
-        # Convert Riot ID to unique system ID (PUUID)
+        # Convert Riot ID to PUUID
         account_data = riot_watcher.account.by_riot_id(MATCH_REGION, game_name, tag_line)
         puuid = account_data['puuid']
         
-          # Fetch last 50 Ranked Solo Queue match IDs (Queue ID 420 = Solo Q)
+        # Pull a larger initial batch (100 matches) to ensure we find 50 pure support games
+        # queue=420 explicitly filters out Normal, Flex, ARAM, and Clash games automatically
         match_ids = lol_watcher.match.matchlist_by_puuid(
-            MATCH_REGION, puuid, count=50, queue=420
+            MATCH_REGION, puuid, count=100, queue=420
         )
         
         player_sls_scores = []
+        valid_games_counted = 0
         
-        print(f"-> Processing 50 matches for {game_name} (Rate limiting active)...")
+        print(f"-> Scanning matches for {game_name} (Filtering for UTILITY role)...")
         for match_id in match_ids:
-            # Sleep 1.2 seconds to prevent crashing a free Riot developer key limit
-            time.sleep(1.2) 
-            
+            # Stop once we have compiled exactly 50 pure support games
+            if valid_games_counted >= 50:
+                break
+                
             match_detail = lol_watcher.match.by_id(MATCH_REGION, match_id)
             info = match_detail['info']
             
-            # Find the target player's stats and their team's total kills
+            # Identify the target player
             target_participant = None
             allied_team_id = None
             total_team_kills = 0
@@ -78,55 +81,60 @@ for player in support_players:
                     allied_team_id = p['teamId']
                     break
             
-            # Skip games if player didn't load or game was an early remake
+            # Core Filters: Skip if player disconnected, game was a remake, or role wasn't Support
             if not target_participant or info['gameDuration'] < 300:
                 continue
+            
+            # Riot maps the Support role specifically to the 'UTILITY' system string
+            if target_participant.get('individualPosition') != 'UTILITY':
+                continue # Discards off-role/autofill games seamlessly
                 
-            # Aggregate total team kills for Kill Participation
+            # Accumulate total team kills for accurate Kill Participation
             for p in info['participants']:
                 if p['teamId'] == allied_team_id:
                     total_team_kills += p['kills']
             
-            # Extract numbers
+            # Extract metrics
             kills = target_participant['kills']
             assists = target_participant['assists']
             deaths = target_participant['deaths']
             vision_score = target_participant['visionScore']
             game_minutes = info['gameDuration'] / 60.0
             
-            # Process metrics
+            # Calculate engineered metrics
             vspm = vision_score / game_minutes
             kp = (kills + assists) / total_team_kills if total_team_kills > 0 else 0.0
             
-            # Compute SLS for this game
+            # Compute SLS and increment count
             game_sls = calculate_sls(kp, vspm, deaths)
             player_sls_scores = np.append(player_sls_scores, game_sls)
+            valid_games_counted += 1
             
-        # Calculate final average for this player
+        # Compile final scoreboard averages
         if len(player_sls_scores) > 0:
             avg_sls = np.mean(player_sls_scores)
             leaderboard.append({
                 "Player": f"{game_name}#{tag_line}",
-                "Games_Analyzed": len(player_sls_scores),
+                "Pure_Support_Games": len(player_sls_scores),
                 "Average_SLS": round(avg_sls, 4)
             })
-            print(f"✅ Finished {game_name}. Avg SLS: {round(avg_sls, 4)}")
+            print(f"✅ Finished {game_name}. Parsed {len(player_sls_scores)} on-role games. Avg SLS: {round(avg_sls, 4)}")
         else:
-            print(f"⚠️ No valid Solo Queue games found for {game_name}.")
+            print(f"⚠️ No valid UTILITY Solo Queue games found for {game_name} in recent match history.")
             
     except ApiError as err:
         if err.response.status_code == 404:
             print(f"❌ Player {game_name}#{tag_line} not found.")
         elif err.response.status_code == 403:
-            print("❌ API Key Expired or Invalid! Go grab a fresh one from Riot.")
+            print("❌ API Key Expired or Invalid! Grab a fresh copy from Riot's site.")
             break
         else:
             print(f"❌ API Error: {err}")
 
 # ==========================================
-# 5. DISPLAY THE TALENT RANKING
+# 5. DISPLAY THE SCOUTING LEADERBOARD
 # ==========================================
-print("\n=== FINAL SUPPORT PROSPECT RANKINGS (BY SLS) ===")
+print("\n=== UPCOMING TALENT RANKINGS: SUPPORT POSITION (BY SLS) ===")
 leaderboard_df = pd.DataFrame(leaderboard)
 if not leaderboard_df.empty:
     leaderboard_df = leaderboard_df.sort_values(by="Average_SLS", ascending=False)
